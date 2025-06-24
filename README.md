@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Análise de Curvas de Bomba
 
 Um aplicativo Python para análise e processamento de curvas características de bombas centrífugas, com interface gráfica moderna e geração automática de relatórios Excel.
@@ -97,7 +96,7 @@ Este projeto está sob a licença MIT. Veja o arquivo `LICENSE` para mais detalh
 
 ## ✨ Autor
 
-Desenvolvido por [Seu Nome]
+Desenvolvido por Skiner Bold
 
 ---
 
