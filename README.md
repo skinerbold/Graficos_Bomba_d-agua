@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Análise de Curvas de Bomba
 
 Um aplicativo Python para análise e processamento de curvas características de bombas centrífugas, com interface gráfica moderna e geração automática de relatórios Excel.
@@ -26,8 +27,8 @@ Um aplicativo Python para análise e processamento de curvas características de
 
 1. Clone o repositório:
 ```bash
-git clone https://github.com/seu-usuario/curvas-bomba.git
-cd curvas-bomba
+git clone https://github.com/skinerbold/Graficos_Bomba_d-agua.git
+cd Graficos_Bomba_d-agua
 ```
 
 2. Instale as dependências:
