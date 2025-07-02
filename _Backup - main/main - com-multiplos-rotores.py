@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QLabel, QPushButton, QFileDialog, QLineEdit, QMessageBox,
                             QGroupBox, QScrollArea, QInputDialog, QDialog, QDialogButtonBox,
                             QTabWidget, QTableWidget, QTableWidgetItem, QAbstractItemView,
-                            QHeaderView, QComboBox)
+                            QHeaderView, QComboBox, QCheckBox)
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QPainterPath, QDoubleValidator
 from PyQt5.QtCore import Qt, QPoint, QRect
 
@@ -1299,25 +1299,9 @@ def _create_charts_in_workbook(wb, system_curve, rotor_names, system_curve_2=Non
                 y_ref = Reference(ws_interp, min_col=2, min_row=start_row, max_row=end_row)
                 series = Series(y_ref, x_ref, title=f"Rotor {rotor}")
                 
-                # Verificar se é um rotor combinado (bomba em paralelo) e aplicar linha tracejada
-                is_combined = False
-                if "Dados" in wb.sheetnames:
-                    ws_data = wb["Dados"]
-                    for row in range(1, ws_data.max_row + 1):
-                        cell = ws_data.cell(row=row, column=1)
-                        if cell.value and isinstance(cell.value, str) and rotor in cell.value:
-                            # Verificar se a eficiência é string (indicando rotor combinado)
-                            eff_cell = ws_data.cell(row=row+2, column=3)  # Primeira linha de dados, coluna eficiência
-                            if eff_cell.value is not None:
-                                eff_value_str = str(eff_cell.value)
-                                if isinstance(eff_cell.value, str) and ":" in eff_value_str:
-                                    is_combined = True
-                                    print(f"Debug: '{rotor}' identificado como rotor combinado para gráfico")
-                            break
-                
-                if is_combined:
+                # Verificar se é uma bomba em paralelo e aplicar linha tracejada
+                if "- Paralelo" in rotor:
                     series.graphicalProperties.line.dashStyle = "dash"
-                    print(f"Debug: aplicada linha tracejada para rotor combinado '{rotor}'")
                 
                 main_chart.series.append(series)
 
@@ -1330,9 +1314,8 @@ def _create_charts_in_workbook(wb, system_curve, rotor_names, system_curve_2=Non
                 eff_series.graphicalProperties.line.width = 20000 # 2pt
                 
                 # Aplicar linha tracejada no gráfico de eficiência também
-                if is_combined:
+                if "- Paralelo" in rotor:
                     eff_series.graphicalProperties.line.dashStyle = "dash"
-                    print(f"Debug: aplicada linha tracejada na eficiência para rotor combinado '{rotor}'")
 
                 eff_chart.series.append(eff_series)
 
@@ -1752,46 +1735,26 @@ def _generate_excel_report(rotor_data, filename="Curvas_Bomba.xlsx", system_curv
 
         x_values = []
         y_values = []
-        efficiencies = []
-        
-        # Encontra ponto de máxima eficiência para a curva do sistema (somente para rotores normais)
+        efficiencies = []        # Encontra ponto de máxima eficiência para a curva do sistema
         if points:
-            # Verificar se é um rotor combinado (eficiência como string)
-            first_point_eff = points[0]['efficiency']
-            if isinstance(first_point_eff, str) and ":" in first_point_eff:
-                # Rotor combinado - não calcular máxima eficiência
-                print(f"Debug: Rotor combinado '{rotor}' - pulando cálculo de máxima eficiência")
-            else:
-                # Rotor normal - encontrar máxima eficiência
-                try:
-                    max_eff_point_data = max(points, key=lambda p: p['efficiency'] if isinstance(p['efficiency'], (int, float)) else 0)
-                    max_efficiency_points.append((max_eff_point_data['vazao'], max_eff_point_data['altura']))
-                except Exception as e:
-                    print(f"Aviso: Erro ao calcular máxima eficiência para rotor '{rotor}': {e}")
+             max_eff_point_data = max(points, key=lambda p: p['efficiency'])
+             max_efficiency_points.append((max_eff_point_data['vazao'], max_eff_point_data['altura']))
 
         for point in points:
             vazao = point['vazao']
             altura = point['altura']
             efficiency = point['efficiency']
-            
-            # Calcular a potência hidráulica: P = ρ * g * Q * h
+              # Calcular a potência hidráulica: P = ρ * g * Q * h
             # ρ = 997 kg/m³, g = 9.81 m/s², Q em m³/s (vazao/3600), h em m (altura)
             vazao_m3s = vazao / 3600  # Converte de m³/h para m³/s
             potencia_hidraulica = 997 * 9.81 * vazao_m3s * altura  # Resultado em W
             
-            # Calcular a potência mecânica
-            # Para rotores combinados (eficiência como string), usar placeholder
-            if isinstance(efficiency, str) and ":" in efficiency:
-                # Rotor combinado - não calcular potência mecânica
-                potencia_mecanica = 0  # Placeholder para rotores combinados
-                print(f"Debug: Rotor combinado '{rotor}' - potência mecânica definida como 0 (placeholder)")
+            # Calcular a potência mecânica: P_mec = P_hidraulica / (eficiência/100)
+            # Eficiência deve ser > 0 para evitar divisão por zero
+            if efficiency > 0:
+                potencia_mecanica = potencia_hidraulica / (efficiency / 100)
             else:
-                # Rotor normal - calcular potência mecânica
-                # Garantir que efficiency é numérico antes da comparação
-                if isinstance(efficiency, (int, float)) and efficiency > 0:
-                    potencia_mecanica = potencia_hidraulica / (efficiency / 100)
-                else:
-                    potencia_mecanica = float('inf')  # Infinito para eficiência zero ou inválida
+                potencia_mecanica = float('inf')  # Infinito para eficiência zero
             
             x_values.append(vazao)
             y_values.append(altura)
@@ -1808,173 +1771,113 @@ def _generate_excel_report(rotor_data, filename="Curvas_Bomba.xlsx", system_curv
 
         # --- Interpolação e escrita na planilha "Interpolados" ---
         if len(x_values) >= 2:
-            # Verificar se é um rotor combinado
-            first_eff = efficiencies[0] if efficiencies else None
-            is_combined_rotor = isinstance(first_eff, str) and ":" in str(first_eff)
-            
-            if is_combined_rotor:
-                # Para rotores combinados, escrever dados originais sem interpolação
-                print(f"Debug: Rotor combinado '{rotor}' - escrevendo dados originais sem interpolação")
-                
-                # Escrever cabeçalho na planilha "Interpolados"
-                ws_interp.merge_cells(start_row=current_row_interp, start_column=1, end_row=current_row_interp, end_column=3)
-                header_cell_interp = ws_interp.cell(row=current_row_interp, column=1, value=f"Rotor {rotor}")
-                header_cell_interp.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
-                header_cell_interp.font = openpyxl.styles.Font(bold=True)
-                current_row_interp += 1
+             # Ordena os pontos pela vazão (x_values) para interpolação correta
+             sorted_indices = np.argsort(x_values)
+             x_sorted = np.array(x_values)[sorted_indices]
+             y_sorted = np.array(y_values)[sorted_indices]
+             eff_sorted = np.array(efficiencies)[sorted_indices]
 
-                headers = ["Vazão (m³/h)", "Altura (m)", "Eficiência (%)"]
-                for col, header in enumerate(headers, 1):
-                    cell = ws_interp.cell(row=current_row_interp, column=col, value=header)
-                    cell.font = openpyxl.styles.Font(bold=True)
-                    cell.alignment = openpyxl.styles.Alignment(horizontal='center')
-                current_row_interp += 1
+             # Verifica se há pontos duplicados em x_sorted
+             unique_x, unique_indices = np.unique(x_sorted, return_index=True)
+             
+             # Always initialize x_unique/y_unique/eff_unique first
+             x_unique = x_sorted
+             y_unique = y_sorted
+             eff_unique = eff_sorted
 
-                # Escrever dados originais ordenados por vazão
-                sorted_indices = np.argsort(x_values)
-                for idx in sorted_indices:
-                    ws_interp.cell(row=current_row_interp, column=1).value = x_values[idx]
-                    ws_interp.cell(row=current_row_interp, column=2).value = y_values[idx]
-                    ws_interp.cell(row=current_row_interp, column=3).value = efficiencies[idx]
-                    current_row_interp += 1
+             # Handle duplicates if found
+             if len(unique_x) < len(x_sorted):
+                  print(f"Aviso: Pontos com mesma vazão encontrados para o rotor '{rotor}'. Usando apenas o primeiro ponto para interpolação.")
+                  x_unique = x_sorted[unique_indices]
+                  y_unique = y_sorted[unique_indices]
+                  eff_unique = eff_sorted[unique_indices]
 
-                current_row_interp += 2  # Espaço entre rotores
-            else:
-                # Rotor normal - fazer interpolação
-                # Verificar se todas as eficiências são numéricas antes de proceder
-                numeric_efficiencies = all(isinstance(eff, (int, float)) for eff in efficiencies)
-                if not numeric_efficiencies:
-                    print(f"Aviso: Rotor '{rotor}' contém eficiências não numéricas. Tratando como rotor combinado.")
-                    # Escrever cabeçalho na planilha "Interpolados"
-                    ws_interp.merge_cells(start_row=current_row_interp, start_column=1, end_row=current_row_interp, end_column=3)
-                    header_cell_interp = ws_interp.cell(row=current_row_interp, column=1, value=f"Rotor {rotor}")
-                    header_cell_interp.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
-                    header_cell_interp.font = openpyxl.styles.Font(bold=True)
-                    current_row_interp += 1
+             # Now check minimum points requirement for ALL cases
+             if len(x_unique) < 2:
+                  print(f"Erro: Não há pontos suficientes com vazão única para interpolar o rotor '{rotor}'.")
+                  continue # Pula a interpolação para este rotor
 
-                    # Cabeçalhos das colunas
-                    ws_interp.cell(row=current_row_interp, column=1, value="Vazão (m³/h)")
-                    ws_interp.cell(row=current_row_interp, column=2, value="Altura (m)")
-                    ws_interp.cell(row=current_row_interp, column=3, value="Eficiência (%)")
-                    for col in range(1, 4):
-                        cell = ws_interp.cell(row=current_row_interp, column=col)
-                        cell.font = openpyxl.styles.Font(bold=True)
-                        cell.alignment = openpyxl.styles.Alignment(horizontal='center')
-                    current_row_interp += 1
+             # Escolhe o tipo de interpolação (linear pode ser mais robusto)
+             interp_kind = 'linear' # Ou 'quadratic'
+             if len(x_unique) < 3 and interp_kind == 'quadratic':
+                  print(f"Aviso: Menos de 3 pontos únicos para rotor '{rotor}', usando interpolação linear.")
+                  interp_kind = 'linear'
 
-                    # Escrever dados originais ordenados por vazão
-                    sorted_indices = np.argsort(x_values)
-                    for idx in sorted_indices:
-                        ws_interp.cell(row=current_row_interp, column=1).value = x_values[idx]
-                        ws_interp.cell(row=current_row_interp, column=2).value = y_values[idx]
-                        ws_interp.cell(row=current_row_interp, column=3).value = efficiencies[idx]
-                        current_row_interp += 1
+             try:
+                  f_vazao = interp1d(x_unique, y_unique, kind=interp_kind, fill_value="extrapolate")
+                  f_eficiencia = interp1d(x_unique, eff_unique, kind=interp_kind, fill_value="extrapolate")
+                  
+                  # Armazenar as funções de interpolação para uso posterior
+                  rotor_interp_funcs[rotor] = f_vazao
+                  rotor_eff_interp_funcs[rotor] = f_eficiencia
+                    # Verificar se as funções têm o atributo 'x' (domínio)
+                  if not hasattr(f_vazao, 'x'):
+                      f_vazao.x = x_unique
+                  if not hasattr(f_eficiencia, 'x'):
+                      f_eficiencia.x = x_unique
 
-                    current_row_interp += 2  # Espaço entre rotores
-                    continue
-                
-                # Ordena os pontos pela vazão (x_values) para interpolação correta
-                sorted_indices = np.argsort(x_values)
-                x_sorted = np.array(x_values)[sorted_indices]
-                y_sorted = np.array(y_values)[sorted_indices]
-                eff_sorted = np.array(efficiencies)[sorted_indices]
+                  # Escreve cabeçalho do rotor na planilha Interpolados
+                  ws_interp.merge_cells(start_row=current_row_interp, start_column=1, end_row=current_row_interp, end_column=5)
+                  header_cell_interp = ws_interp.cell(row=current_row_interp, column=1, value=f"Rotor {rotor}")
+                  header_cell_interp.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
+                  header_cell_interp.font = openpyxl.styles.Font(bold=True)
+                  current_row_interp += 1
 
-                # Verifica se há pontos duplicados em x_sorted
-                unique_x, unique_indices = np.unique(x_sorted, return_index=True)
-                
-                # Always initialize x_unique/y_unique/eff_unique first
-                x_unique = x_sorted
-                y_unique = y_sorted
-                eff_unique = eff_sorted
+                  # Cabeçalhos para planilha Interpolados (com colunas de potência)
+                  headers_interp = ["Vazão (m³/h)", "Altura (m)", "Eficiência (%)", "Potência Hidráulica (W)", "Potência Mecânica (W)"]
+                  for col, header in enumerate(headers_interp, 1):
+                      cell = ws_interp.cell(row=current_row_interp, column=col, value=header)
+                      cell.font = openpyxl.styles.Font(bold=True)
+                      cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                  current_row_interp += 1                  # Gera pontos interpolados usando o domínio específico de cada rotor
+                  x_min, x_max = min(x_unique), max(x_unique)
+                  
+                  # CORREÇÃO: Não usar vazão máxima global - cada rotor tem seu próprio intervalo
+                  # O intervalo de interpolação deve respeitar os dados reais do rotor específico
+                  print(f"Intervalo de interpolação para Rotor {rotor}: [{x_min:.2f}, {x_max:.2f}] m³/h")
+                  
+                  # Gerar pontos interpolados respeitando o domínio específico do rotor
+                  x_new = np.linspace(x_min, x_max, 100)
+                  y_new = f_vazao(x_new)
+                  eff_new = f_eficiencia(x_new)
 
-                # Handle duplicates if found
-                if len(unique_x) < len(x_sorted):
-                     print(f"Aviso: Pontos com mesma vazão encontrados para o rotor '{rotor}'. Usando apenas o primeiro ponto para interpolação.")
-                     x_unique = x_sorted[unique_indices]
-                     y_unique = y_sorted[unique_indices]
-                     eff_unique = eff_sorted[unique_indices]
+                  # Limita eficiência entre 0 e 100 (interpolação pode extrapolar)
+                  eff_new = np.clip(eff_new, 0, 100)
+                  # Limita altura a >= 0
+                  y_new = np.maximum(y_new, 0)
 
-                # Now check minimum points requirement for ALL cases
-                if len(x_unique) < 2:
-                     print(f"Erro: Não há pontos suficientes com vazão única para interpolar o rotor '{rotor}'.")
-                     continue # Pula a interpolação para este rotor
+                  for x, y, eff in zip(x_new, y_new, eff_new):
+                      # Calcular potência hidráulica: P = ρ * g * Q * h
+                      # ρ = 997 kg/m³, g = 9.81 m/s², Q em m³/s (x/3600), h em m (y)
+                      vazao_m3s = x / 3600  # Converte de m³/h para m³/s
+                      potencia_hidraulica = 997 * 9.81 * vazao_m3s * y  # Resultado em W
+                      
+                      # Calcular potência mecânica: P_mec = P_hidraulica / (eficiência/100)
+                      if eff > 0:
+                          potencia_mecanica = potencia_hidraulica / (eff / 100)
+                      else:
+                          potencia_mecanica = float('inf')  # Infinito para eficiência zero
+                      
+                      ws_interp.cell(row=current_row_interp, column=1).value = x
+                      ws_interp.cell(row=current_row_interp, column=2).value = y
+                      ws_interp.cell(row=current_row_interp, column=3).value = eff
+                      ws_interp.cell(row=current_row_interp, column=4).value = potencia_hidraulica
+                      ws_interp.cell(row=current_row_interp, column=5).value = potencia_mecanica
+                      current_row_interp += 1
 
-                # Escolhe o tipo de interpolação (linear pode ser mais robusto)
-                interp_kind = 'linear' # Ou 'quadratic'
-                if len(x_unique) < 3 and interp_kind == 'quadratic':
-                     print(f"Aviso: Menos de 3 pontos únicos para rotor '{rotor}', usando interpolação linear.")
-                     interp_kind = 'linear'
+                  current_row_interp += 2 # Espaço entre rotores
 
-                try:
-                     f_vazao = interp1d(x_unique, y_unique, kind=interp_kind, fill_value="extrapolate")
-                     f_eficiencia = interp1d(x_unique, eff_unique, kind=interp_kind, fill_value="extrapolate")
-                     
-                     # Armazenar as funções de interpolação para uso posterior
-                     rotor_interp_funcs[rotor] = f_vazao
-                     rotor_eff_interp_funcs[rotor] = f_eficiencia
-                     
-                     # Verificar se as funções têm o atributo 'x' (domínio)
-                     if not hasattr(f_vazao, 'x'):
-                         f_vazao.x = x_unique
-                     if not hasattr(f_eficiencia, 'x'):
-                         f_eficiencia.x = x_unique
-
-                     # Escreve cabeçalho do rotor na planilha Interpolados
-                     ws_interp.merge_cells(start_row=current_row_interp, start_column=1, end_row=current_row_interp, end_column=5)
-                     header_cell_interp = ws_interp.cell(row=current_row_interp, column=1, value=f"Rotor {rotor}")
-                     header_cell_interp.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
-                     header_cell_interp.font = openpyxl.styles.Font(bold=True)
-                     current_row_interp += 1
-
-                     # Cabeçalhos para planilha Interpolados (com colunas de potência)
-                     headers_interp = ["Vazão (m³/h)", "Altura (m)", "Eficiência (%)", "Potência Hidráulica (W)", "Potência Mecânica (W)"]
-                     for col, header in enumerate(headers_interp, 1):
-                         cell = ws_interp.cell(row=current_row_interp, column=col, value=header)
-                         cell.font = openpyxl.styles.Font(bold=True)
-                         cell.alignment = openpyxl.styles.Alignment(horizontal='center')
-                     current_row_interp += 1
-                     
-                     # Gera pontos interpolados usando o domínio específico de cada rotor
-                     x_min, x_max = min(x_unique), max(x_unique)
-                     
-                     # CORREÇÃO: Não usar vazão máxima global - cada rotor tem seu próprio intervalo
-                     # O intervalo de interpolação deve respeitar os dados reais do rotor específico
-                     print(f"Intervalo de interpolação para Rotor {rotor}: [{x_min:.2f}, {x_max:.2f}] m³/h")
-                     
-                     # Gerar pontos interpolados respeitando o domínio específico do rotor
-                     x_new = np.linspace(x_min, x_max, 100)
-                     y_new = f_vazao(x_new)
-                     eff_new = f_eficiencia(x_new)
-
-                     # Limita eficiência entre 0 e 100 (interpolação pode extrapolar)
-                     eff_new = np.clip(eff_new, 0, 100)
-                     # Limita altura a >= 0
-                     y_new = np.maximum(y_new, 0)
-
-                     for x, y, eff in zip(x_new, y_new, eff_new):
-                         # Calcular potência hidráulica: P = ρ * g * Q * h
-                         # ρ = 997 kg/m³, g = 9.81 m/s², Q em m³/s (x/3600), h em m (y)
-                         vazao_m3s = x / 3600  # Converte de m³/h para m³/s
-                         potencia_hidraulica = 997 * 9.81 * vazao_m3s * y  # Resultado em W
-                         
-                         # Calcular potência mecânica: P_mec = P_hidraulica / (eficiência/100)
-                         if eff > 0:
-                             potencia_mecanica = potencia_hidraulica / (eff / 100)
-                         else:
-                             potencia_mecanica = float('inf')  # Infinito para eficiência zero
-                         
-                         ws_interp.cell(row=current_row_interp, column=1).value = x
-                         ws_interp.cell(row=current_row_interp, column=2).value = y
-                         ws_interp.cell(row=current_row_interp, column=3).value = eff
-                         ws_interp.cell(row=current_row_interp, column=4).value = potencia_hidraulica
-                         ws_interp.cell(row=current_row_interp, column=5).value = potencia_mecanica
-                         current_row_interp += 1
-
-                     current_row_interp += 2 # Espaço entre rotores
-
-                except ValueError as ve:
-                     print(f"Erro de interpolação para o rotor '{rotor}': {ve}. Verifique os dados de entrada.")
-                     continue # Pula para o próximo rotor
+             except ValueError as ve:
+                  print(f"Erro de interpolação para o rotor '{rotor}': {ve}. Verifique os dados de entrada.")
+                  # Remove o cabeçalho parcialmente escrito se a interpolação falhar
+                  if ws_interp.cell(row=current_row_interp-1, column=1).value == headers_interp[0]: # Verifica se o cabeçalho foi escrito
+                       ws_interp.delete_rows(current_row_interp-1, 1)
+                       current_row_interp -=1
+                  if ws_interp.cell(row=current_row_interp-1, column=1).value == f"Rotor {rotor}":
+                       ws_interp.delete_rows(current_row_interp-1, 1)
+                       ws_interp.unmerge_cells(start_row=current_row_interp-1, start_column=1, end_row=current_row_interp-1, end_column=5)
+                       current_row_interp -=1
+                  continue # Pula para o próximo rotor
 
         else:
              print(f"Aviso: Rotor '{rotor}' tem menos de 2 pontos, interpolação não realizada.")
@@ -2106,6 +2009,80 @@ class StartupDialog(QDialog):
     def set_mode(self, mode):
         self.selected_mode = mode
         self.accept()
+
+class MultiRotorSelectionDialog(QDialog):
+    """Diálogo para seleção múltipla de rotores"""
+    def __init__(self, parent, available_rotors):
+        super().__init__(parent)
+        self.setWindowTitle("Selecionar Rotores para Combinação")
+        self.setModal(True)
+        self.resize(400, 300)
+        
+        self.available_rotors = available_rotors
+        self.checkboxes = {}
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        
+        # Título
+        title_label = QLabel("Selecione os rotores que deseja combinar em paralelo:")
+        title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(title_label)
+        
+        # Área de scroll para os checkboxes
+        scroll_area = QScrollArea()
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        
+        # Criar checkboxes para cada rotor
+        for rotor in self.available_rotors:
+            checkbox = QCheckBox(rotor)
+            self.checkboxes[rotor] = checkbox
+            scroll_layout.addWidget(checkbox)
+        
+        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidgetResizable(True)
+        layout.addWidget(scroll_area)
+        
+        # Botões de seleção rápida
+        quick_select_layout = QHBoxLayout()
+        btn_select_all = QPushButton("Selecionar Todos")
+        btn_select_all.clicked.connect(self.select_all)
+        btn_clear_all = QPushButton("Limpar Todos")
+        btn_clear_all.clicked.connect(self.clear_all)
+        
+        quick_select_layout.addWidget(btn_select_all)
+        quick_select_layout.addWidget(btn_clear_all)
+        quick_select_layout.addStretch()
+        layout.addLayout(quick_select_layout)
+        
+        # Botões OK/Cancel
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        self.setLayout(layout)
+    
+    def select_all(self):
+        """Seleciona todos os rotores"""
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(True)
+    
+    def clear_all(self):
+        """Limpa todas as seleções"""
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(False)
+    
+    def get_selected_rotors(self):
+        """Retorna lista de rotores selecionados"""
+        selected = []
+        for rotor, checkbox in self.checkboxes.items():
+            if checkbox.isChecked():
+                selected.append(rotor)
+        return selected
 
 # Definição da Classe para Entrada Manual (MOVIDA PARA CÁ, FORA DO BLOCO GLOBAL)
 class PumpAnalyzerManual(QMainWindow):
@@ -2295,7 +2272,7 @@ class PumpAnalyzerManual(QMainWindow):
 
     def gather_data_from_tables(self):
         """Coleta os dados de todas as tabelas e retorna um novo dicionário."""
-        # Modificado para preservar eficiência como string para rotores combinados
+        # Modificado para NÃO atualizar self.manual_rotor_data aqui
         updated_data = {}
         for i in range(self.tab_widget.count()):
             rotor_name = self.tab_widget.tabText(i)
@@ -2315,20 +2292,11 @@ class PumpAnalyzerManual(QMainWindow):
 
                         vazao = float(vazao_item.text().replace(',', '.'))
                         altura = float(altura_item.text().replace(',', '.'))
-                        
-                        # Verificar se é um rotor combinado (eficiência como string)
-                        eff_text = eff_item.text().strip()
-                        
-                        # Se contém ":" é uma eficiência combinada, manter como string
-                        if ":" in eff_text:
-                            efficiency = eff_text  # Manter como string
-                            print(f"Debug: Rotor combinado '{rotor_name}' - eficiência mantida como string: '{efficiency}'")
-                        else:
-                            # Rotor normal, converter para float
-                            efficiency = float(eff_text.replace(',', '.'))
-                            if efficiency < 0 or efficiency > 100:
-                                QMessageBox.warning(self, "Dado Inválido", f"Eficiência inválida ({efficiency}%) na linha {row+1} do rotor '{rotor_name}'. Deve estar entre 0 e 100.")
-                                return None # Indica erro
+                        efficiency = float(eff_item.text().replace(',', '.'))
+
+                        if efficiency < 0 or efficiency > 100:
+                             QMessageBox.warning(self, "Dado Inválido", f"Eficiência inválida ({efficiency}%) na linha {row+1} do rotor '{rotor_name}'. Deve estar entre 0 e 100.")
+                             return None # Indica erro
 
                         rotor_points.append({'vazao': vazao, 'altura': altura, 'efficiency': efficiency})
                     except ValueError:
@@ -2337,7 +2305,7 @@ class PumpAnalyzerManual(QMainWindow):
                     except Exception as e:
                          QMessageBox.critical(self, "Erro Inesperado", f"Erro ao ler dados da linha {row+1} do rotor '{rotor_name}': {e}")
                          return None # Indica erro
-                updated_data[rotor_name] = rotor_points        
+                updated_data[rotor_name] = rotor_points        # Não atualiza self.manual_rotor_data aqui, apenas retorna
         return updated_data
 
 
@@ -2935,43 +2903,35 @@ class PumpAnalyzerManual(QMainWindow):
                                  equation_params=equation_params,
                                  system_curve_mode_2=mode_2,
                                  manual_points_2=manual_points_2,
-                                 equation_params_2=equation_params_2)                                 
+                                 equation_params_2=equation_params_2)
+                                 
         except Exception as e:
             QMessageBox.critical(self, "Erro", f"Erro ao salvar relatório: {str(e)}")
 
     def create_parallel_pump(self):
-        """Criar uma bomba em paralelo - permite escolher entre mesmo rotor ou rotores diferentes"""
+        """Criar bombas em paralelo - mesmo rotor ou rotores diferentes"""
         if self.tab_widget.count() == 0:
             QMessageBox.warning(self, "Erro", "Nenhum rotor disponível!")
             return
-            
-        # Diálogo para escolher o tipo de bomba em paralelo
-        choice_dialog = QDialog(self)
-        choice_dialog.setWindowTitle("Tipo de Bomba em Paralelo")
-        choice_layout = QVBoxLayout()
         
-        choice_layout.addWidget(QLabel("Escolha o tipo de bomba em paralelo:"))
+        # Diálogo para escolher tipo
+        reply = QMessageBox.question(
+            self, "Tipo de Bomba em Paralelo",
+            "Que tipo de configuração paralela deseja criar?\n\n"
+            "• Sim: Usar o mesmo rotor em paralelo\n"
+            "• Não: Combinar rotores diferentes",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
         
-        btn_same_rotor = QPushButton("Mesmo Rotor (2x o rotor selecionado)")
-        btn_different_rotors = QPushButton("Rotores Diferentes (combinar 2 rotores)")
-        
-        btn_same_rotor.clicked.connect(lambda: self.create_same_rotor_parallel(choice_dialog))
-        btn_different_rotors.clicked.connect(lambda: self.create_different_rotors_parallel(choice_dialog))
-        
-        choice_layout.addWidget(btn_same_rotor)
-        choice_layout.addWidget(btn_different_rotors)
-        
-        cancel_btn = QPushButton("Cancelar")
-        cancel_btn.clicked.connect(choice_dialog.reject)
-        choice_layout.addWidget(cancel_btn)
-        
-        choice_dialog.setLayout(choice_layout)
-        choice_dialog.exec_()
-    
-    def create_same_rotor_parallel(self, parent_dialog):
-        """Criar bomba em paralelo baseada no mesmo rotor"""
-        parent_dialog.accept()
-        
+        if reply == QMessageBox.Yes:
+            # Funcionalidade atual (mesmo rotor)
+            self.create_same_rotor_parallel()
+        elif reply == QMessageBox.No:
+            # Nova funcionalidade (rotores diferentes)
+            self.create_multiple_rotor_parallel()
+
+    def create_same_rotor_parallel(self):
+        """Criar bomba em paralelo do mesmo rotor (funcionalidade atual)"""
         current_index = self.tab_widget.currentIndex()
         if current_index < 0:
             QMessageBox.warning(self, "Erro", "Nenhum rotor selecionado!")
@@ -3032,282 +2992,6 @@ class PumpAnalyzerManual(QMainWindow):
             f"• Eficiência: Mantida constante\n"
             f"• Visualização: Linha tracejada no gráfico"
         )
-    
-    def create_different_rotors_parallel(self, parent_dialog):
-        """Criar bomba em paralelo combinando dois rotores diferentes"""
-        parent_dialog.accept()
-        
-        if self.tab_widget.count() < 2:
-            QMessageBox.warning(self, "Erro", "São necessários pelo menos 2 rotores para criar uma bomba em paralelo com rotores diferentes!")
-            return
-        
-        # Obter lista de rotores disponíveis
-        available_rotors = []
-        for i in range(self.tab_widget.count()):
-            rotor_name = self.tab_widget.tabText(i)
-            # Excluir rotores que já são paralelos para evitar combinações complexas
-            if "- Paralelo" not in rotor_name:
-                available_rotors.append(rotor_name)
-        
-        if len(available_rotors) < 2:
-            QMessageBox.warning(self, "Erro", "São necessários pelo menos 2 rotores básicos (não paralelos) para criar esta combinação!")
-            return
-        
-        # Diálogo para seleção de rotores
-        selection_dialog = QDialog(self)
-        selection_dialog.setWindowTitle("Selecionar Rotores para Paralelo")
-        selection_layout = QVBoxLayout()
-        
-        selection_layout.addWidget(QLabel("Selecione dois rotores para combinar em paralelo:"))
-        
-        # Primeiro rotor
-        selection_layout.addWidget(QLabel("Primeiro Rotor:"))
-        rotor1_combo = QComboBox()
-        rotor1_combo.addItems(available_rotors)
-        selection_layout.addWidget(rotor1_combo)
-        
-        # Segundo rotor
-        selection_layout.addWidget(QLabel("Segundo Rotor:"))
-        rotor2_combo = QComboBox()
-        rotor2_combo.addItems(available_rotors)
-        if len(available_rotors) > 1:
-            rotor2_combo.setCurrentIndex(1)  # Selecionar um rotor diferente por padrão
-        selection_layout.addWidget(rotor2_combo)
-        
-        # Botões
-        button_layout = QHBoxLayout()
-        ok_btn = QPushButton("Criar Paralelo")
-        cancel_btn = QPushButton("Cancelar")
-        
-        button_layout.addWidget(ok_btn)
-        button_layout.addWidget(cancel_btn)
-        selection_layout.addLayout(button_layout)
-        
-        selection_dialog.setLayout(selection_layout)
-        
-        def create_combined_parallel():
-            rotor1 = rotor1_combo.currentText()
-            rotor2 = rotor2_combo.currentText()
-            
-            if rotor1 == rotor2:
-                QMessageBox.warning(selection_dialog, "Erro", "Selecione dois rotores diferentes!")
-                return
-            
-            selection_dialog.accept()
-            self.create_combined_parallel_pump(rotor1, rotor2)
-        
-        ok_btn.clicked.connect(create_combined_parallel)
-        cancel_btn.clicked.connect(selection_dialog.reject)
-        
-        selection_dialog.exec_()
-    
-    def create_combined_parallel_pump(self, rotor1_name, rotor2_name):
-        """Cria uma bomba em paralelo combinando dois rotores diferentes"""
-        try:
-            # Obter dados dos dois rotores
-            rotor1_data = self.get_rotor_data(rotor1_name)
-            rotor2_data = self.get_rotor_data(rotor2_name)
-            
-            if not rotor1_data or not rotor2_data:
-                QMessageBox.warning(self, "Erro", "Não foi possível obter dados dos rotores selecionados!")
-                return
-            
-            # Nome do rotor combinado
-            combined_name = f"{rotor1_name}+{rotor2_name} - Paralelo"
-            
-            # Verificar se já existe
-            existing_count = 0
-            for i in range(self.tab_widget.count()):
-                if self.tab_widget.tabText(i).startswith(combined_name):
-                    existing_count += 1
-            
-            if existing_count > 0:
-                combined_name = f"{rotor1_name}+{rotor2_name} - Paralelo ({existing_count + 1})"
-            
-            # Criar pontos combinados
-            combined_points = self.combine_rotor_curves(rotor1_data, rotor2_data, rotor1_name, rotor2_name)
-            
-            if not combined_points:
-                QMessageBox.warning(self, "Erro", "Não foi possível combinar as curvas dos rotores!")
-                return
-            
-            # Criar nova tab com dados combinados
-            self.add_combined_parallel_tab(combined_name, combined_points, rotor1_name, rotor2_name)
-            
-            QMessageBox.information(
-                self, "Sucesso", 
-                f"Bomba em paralelo '{combined_name}' criada com sucesso!\n\n"
-                f"Características:\n"
-                f"• Vazão: Soma das vazões dos dois rotores\n"
-                f"• Altura: Altura para cada vazão correspondente\n"
-                f"• Eficiência: Combinação das eficiências individuais\n"
-                f"• Visualização: Linha tracejada no gráfico"
-            )
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Erro ao criar bomba em paralelo: {str(e)}")
-    
-    def get_rotor_data(self, rotor_name):
-        """Obter dados de um rotor específico"""
-        for i in range(self.tab_widget.count()):
-            if self.tab_widget.tabText(i) == rotor_name:
-                tab = self.tab_widget.widget(i)
-                table = tab.findChild(QTableWidget)
-                if table and table.rowCount() > 0:
-                    data = []
-                    for row in range(table.rowCount()):
-                        try:
-                            vazao_item = table.item(row, 0)
-                            altura_item = table.item(row, 1)
-                            eff_item = table.item(row, 2)
-                            
-                            if vazao_item and altura_item and eff_item:
-                                vazao = float(vazao_item.text().replace(',', '.'))
-                                altura = float(altura_item.text().replace(',', '.'))
-                                efficiency = float(eff_item.text().replace(',', '.'))
-                                data.append({'vazao': vazao, 'altura': altura, 'efficiency': efficiency})
-                        except (ValueError, AttributeError):
-                            continue
-                    return data
-        return None
-    
-    def combine_rotor_curves(self, rotor1_data, rotor2_data, rotor1_name, rotor2_name):
-        """Combina duas curvas de rotor para operação em paralelo"""
-        try:
-            # Extrair dados dos rotores
-            q1 = [point['vazao'] for point in rotor1_data]
-            h1 = [point['altura'] for point in rotor1_data]
-            eff1 = [point['efficiency'] for point in rotor1_data]
-            
-            q2 = [point['vazao'] for point in rotor2_data]
-            h2 = [point['altura'] for point in rotor2_data]
-            eff2 = [point['efficiency'] for point in rotor2_data]
-            
-            # Criar funções de interpolação
-            from scipy.interpolate import interp1d
-            
-            interp1_h = interp1d(q1, h1, kind='linear', bounds_error=False, fill_value='extrapolate')
-            interp1_eff = interp1d(q1, eff1, kind='linear', bounds_error=False, fill_value='extrapolate')
-            
-            interp2_h = interp1d(q2, h2, kind='linear', bounds_error=False, fill_value='extrapolate')
-            interp2_eff = interp1d(q2, eff2, kind='linear', bounds_error=False, fill_value='extrapolate')
-            
-            # Determinar faixa de alturas comum
-            h_min = max(min(h1), min(h2))
-            h_max = min(max(h1), max(h2))
-            
-            if h_min >= h_max:
-                QMessageBox.warning(None, "Aviso", "Os rotores não possuem faixa de altura compatível para operação em paralelo!")
-                return None
-            
-            # Gerar pontos de altura para a curva combinada
-            num_points = 20
-            h_combined = np.linspace(h_min, h_max, num_points)
-            
-            combined_points = []
-            
-            for h in h_combined:
-                try:
-                    # Para cada altura, encontrar as vazões correspondentes em cada rotor
-                    # Resolver H = f(Q) para Q, ou seja, encontrar Q tal que f(Q) = H
-                    
-                    # Função para encontrar vazão que resulta na altura desejada
-                    def find_flow_for_height(interp_func, target_height, flow_range):
-                        from scipy.optimize import minimize_scalar
-                        
-                        def height_diff(q):
-                            return abs(interp_func(q) - target_height)
-                        
-                        result = minimize_scalar(height_diff, bounds=flow_range, method='bounded')
-                        return result.x if result.success else None
-                    
-                    # Encontrar vazões para a altura h
-                    q1_for_h = find_flow_for_height(interp1_h, h, (min(q1), max(q1)))
-                    q2_for_h = find_flow_for_height(interp2_h, h, (min(q2), max(q2)))
-                    
-                    if q1_for_h is not None and q2_for_h is not None:
-                        # Vazão combinada = soma das vazões individuais
-                        q_combined = q1_for_h + q2_for_h
-                        
-                        # Eficiência combinada como string mostrando ambas
-                        eff1_at_q = float(interp1_eff(q1_for_h))
-                        eff2_at_q = float(interp2_eff(q2_for_h))
-                        
-                        # Criar string de eficiência combinada
-                        eff_combined_str = f"{eff1_at_q:.1f}%:{eff2_at_q:.1f}%"
-                        
-                        combined_points.append({
-                            'vazao': q_combined,
-                            'altura': h,
-                            'efficiency': eff_combined_str  # String, não float!
-                        })
-                        
-                except Exception as e:
-                    print(f"Erro ao calcular ponto para altura {h}: {e}")
-                    continue
-            
-            # Ordenar por vazão
-            combined_points.sort(key=lambda x: x['vazao'])
-            
-            return combined_points
-            
-        except Exception as e:
-            print(f"Erro ao combinar curvas: {e}")
-            return None
-    
-    def add_combined_parallel_tab(self, combined_name, combined_points, rotor1_name, rotor2_name):
-        """Cria uma nova tab com dados de bomba em paralelo combinada"""
-        # Usar RPM médio dos rotores base
-        rpm1 = self.rotor_rpm.get(rotor1_name, 1750)
-        rpm2 = self.rotor_rpm.get(rotor2_name, 1750)
-        avg_rpm = (rpm1 + rpm2) / 2
-        self.rotor_rpm[combined_name] = avg_rpm
-        
-        # Criar nova tab
-        tab = QWidget()
-        layout = QVBoxLayout()
-        
-        # Adicionar label informativo
-        info_label = QLabel(f"Bomba em Paralelo combinando: {rotor1_name} + {rotor2_name}")
-        info_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
-        layout.addWidget(info_label)
-        
-        table = QTableWidget(len(combined_points), 3)
-        table.setHorizontalHeaderLabels(["Vazão (m³/h)", "Altura (m)", "Eficiência (%)"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        
-        # Preencher tabela com dados combinados
-        for row, point in enumerate(combined_points):
-            try:
-                table.setItem(row, 0, QTableWidgetItem(str(round(point['vazao'], 2)).replace('.', ',')))
-                table.setItem(row, 1, QTableWidgetItem(str(round(point['altura'], 2)).replace('.', ',')))
-                
-                # A eficiência já é string para rotores combinados
-                if isinstance(point['efficiency'], str):
-                    table.setItem(row, 2, QTableWidgetItem(point['efficiency']))
-                else:
-                    table.setItem(row, 2, QTableWidgetItem(str(round(point['efficiency'], 1)).replace('.', ',')))
-                    
-            except Exception as e:
-                print(f"Erro ao preencher linha {row}: {e}")
-                continue
-        
-        # Adiciona botões de controle da tabela
-        table_buttons_layout = QHBoxLayout()
-        btn_add_row = QPushButton("Adicionar Ponto")
-        btn_add_row.clicked.connect(lambda _, table=table: self.add_table_row(table))
-        btn_remove_row = QPushButton("Remover Ponto Selecionado")
-        btn_remove_row.clicked.connect(lambda _, table=table: self.remove_selected_table_row(table))
-        table_buttons_layout.addWidget(btn_add_row)
-        table_buttons_layout.addWidget(btn_remove_row)
-        table_buttons_layout.addStretch()
-        
-        layout.addWidget(table)
-        layout.addLayout(table_buttons_layout)
-        tab.setLayout(layout)
-        
-        self.tab_widget.addTab(tab, combined_name)
-        self.tab_widget.setCurrentWidget(tab)
 
     def add_parallel_pump_tab(self, parallel_rotor_name, original_table, base_rotor_name):
         """Cria uma nova tab com dados de bomba em paralelo"""
@@ -3368,6 +3052,225 @@ class PumpAnalyzerManual(QMainWindow):
         
         self.tab_widget.addTab(tab, parallel_rotor_name)
         self.tab_widget.setCurrentWidget(tab)
+
+    def create_multiple_rotor_parallel(self):
+        """Criar bomba combinando múltiplos rotores diferentes"""
+        # Obter lista de rotores disponíveis
+        available_rotors = []
+        for i in range(self.tab_widget.count()):
+            rotor_name = self.tab_widget.tabText(i)
+            # Verificar se o rotor tem dados
+            tab = self.tab_widget.widget(i)
+            table = tab.findChild(QTableWidget)
+            if table and table.rowCount() > 0:
+                available_rotors.append(rotor_name)
+        
+        if len(available_rotors) < 2:
+            QMessageBox.warning(self, "Erro", "São necessários pelo menos 2 rotores com dados para combinar!")
+            return
+        
+        # Criar diálogo de seleção múltipla
+        dialog = MultiRotorSelectionDialog(self, available_rotors)
+        if dialog.exec_() == QDialog.Accepted:
+            selected_rotors = dialog.get_selected_rotors()
+            if len(selected_rotors) < 2:
+                QMessageBox.warning(self, "Erro", "Selecione pelo menos 2 rotores!")
+                return
+            
+            self.combine_rotors_in_parallel(selected_rotors)
+
+    def combine_rotors_in_parallel(self, selected_rotors):
+        """Combina os rotores selecionados em paralelo"""
+        try:
+            # Obter dados de todos os rotores selecionados
+            rotor_data = {}
+            for rotor_name in selected_rotors:
+                # Encontrar a tab do rotor
+                tab_index = None
+                for i in range(self.tab_widget.count()):
+                    if self.tab_widget.tabText(i) == rotor_name:
+                        tab_index = i
+                        break
+                
+                if tab_index is None:
+                    continue
+                
+                tab = self.tab_widget.widget(tab_index)
+                table = tab.findChild(QTableWidget)
+                
+                # Extrair dados do rotor
+                points = []
+                for row in range(table.rowCount()):
+                    try:
+                        vazao_item = table.item(row, 0)
+                        altura_item = table.item(row, 1)
+                        eff_item = table.item(row, 2)
+                        
+                        if not (vazao_item and altura_item and eff_item and
+                                vazao_item.text() and altura_item.text() and eff_item.text()):
+                            continue
+                        
+                        vazao = self.convert_br_float(vazao_item.text())
+                        altura = self.convert_br_float(altura_item.text())
+                        eficiencia = self.convert_br_float(eff_item.text())
+                        
+                        points.append({
+                            'vazao': vazao,
+                            'altura': altura,
+                            'eficiencia': eficiencia
+                        })
+                    except (ValueError, AttributeError):
+                        continue
+                
+                rotor_data[rotor_name] = points
+            
+            # Calcular pontos combinados
+            combined_points = self.calculate_parallel_combination(rotor_data)
+            
+            if not combined_points:
+                QMessageBox.warning(self, "Erro", "Não foi possível calcular a combinação!")
+                return
+            
+            # Criar nome da combinação
+            rotor_names_short = [name.split()[0] if len(name.split()) > 0 else name for name in selected_rotors]
+            combined_name = f"Rotores {','.join(rotor_names_short)} em Paralelo"
+            
+            # Verificar se já existe
+            existing_count = 0
+            for i in range(self.tab_widget.count()):
+                tab_name = self.tab_widget.tabText(i)
+                if tab_name.startswith(combined_name.split(" (")[0]):
+                    existing_count += 1
+            
+            if existing_count > 0:
+                combined_name = f"{combined_name} ({existing_count + 1})"
+            
+            # Criar nova tab com os dados combinados
+            self.add_combined_parallel_tab(combined_name, combined_points, selected_rotors)
+            
+            QMessageBox.information(
+                self, "Sucesso", 
+                f"Combinação '{combined_name}' criada com sucesso!\n\n"
+                f"Rotores combinados: {', '.join(selected_rotors)}\n"
+                f"Pontos gerados: {len(combined_points)}\n\n"
+                f"Características:\n"
+                f"• Vazão: Soma das vazões nos pontos de mesma altura\n"
+                f"• Altura: Pontos de altura correspondentes\n"
+                f"• Eficiência: Individual de cada bomba\n"
+                f"• Visualização: Linha tracejada no gráfico"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao combinar rotores: {str(e)}")
+
+    def calculate_parallel_combination(self, rotor_data):
+        """Calcula a combinação em paralelo dos rotores"""
+        try:
+            # Obter todas as alturas únicas de todos os rotores
+            all_heights = set()
+            for rotor_name, points in rotor_data.items():
+                for point in points:
+                    all_heights.add(round(point['altura'], 2))  # Arredondar para evitar problemas de precisão
+            
+            all_heights = sorted(list(all_heights))
+            
+            # Para cada altura, calcular a vazão combinada
+            combined_points = []
+            
+            for target_height in all_heights:
+                # Verificar quais rotores têm dados nesta altura (ou próximo)
+                rotors_at_height = []
+                tolerance = 0.5  # Tolerância para altura (metros)
+                
+                for rotor_name, points in rotor_data.items():
+                    # Procurar ponto mais próximo dessa altura
+                    closest_point = None
+                    min_diff = float('inf')
+                    
+                    for point in points:
+                        height_diff = abs(point['altura'] - target_height)
+                        if height_diff < min_diff and height_diff <= tolerance:
+                            min_diff = height_diff
+                            closest_point = point
+                    
+                    if closest_point:
+                        rotors_at_height.append({
+                            'rotor': rotor_name,
+                            'vazao': closest_point['vazao'],
+                            'altura': closest_point['altura'],
+                            'eficiencia': closest_point['eficiencia']
+                        })
+                
+                # Se temos pelo menos 2 rotores nesta altura, criar ponto combinado
+                if len(rotors_at_height) >= 2:
+                    total_vazao = sum(r['vazao'] for r in rotors_at_height)
+                    
+                    # Usar a altura média
+                    avg_altura = sum(r['altura'] for r in rotors_at_height) / len(rotors_at_height)
+                    
+                    # Para eficiência, vamos criar uma string com as eficiências individuais
+                    eficiencias_str = ', '.join([f"{r['rotor']}: {r['eficiencia']:.1f}%" for r in rotors_at_height])
+                    
+                    combined_points.append({
+                        'vazao': total_vazao,
+                        'altura': avg_altura,
+                        'eficiencias_individuais': eficiencias_str,
+                        'rotores_envolvidos': [r['rotor'] for r in rotors_at_height]
+                    })
+            
+            return combined_points
+            
+        except Exception as e:
+            print(f"Erro no cálculo da combinação: {e}")
+            return []
+
+    def add_combined_parallel_tab(self, combined_name, combined_points, original_rotors):
+        """Cria uma nova tab com dados da combinação em paralelo"""
+        # Criar nova tab
+        tab = QWidget()
+        layout = QVBoxLayout()
+        
+        # Adicionar label informativo
+        info_label = QLabel(f"Combinação em Paralelo de: {', '.join(original_rotors)}")
+        info_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
+        layout.addWidget(info_label)
+        
+        # Criar tabela especial para dados combinados
+        table = QTableWidget(len(combined_points), 4)
+        table.setHorizontalHeaderLabels(["Vazão (m³/h)", "Altura (m)", "Eficiências Individuais", "Rotores Envolvidos"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        
+        # Preencher dados
+        for row, point in enumerate(combined_points):
+            table.setItem(row, 0, QTableWidgetItem(str(round(point['vazao'], 2)).replace('.', ',')))
+            table.setItem(row, 1, QTableWidgetItem(str(round(point['altura'], 2)).replace('.', ',')))
+            table.setItem(row, 2, QTableWidgetItem(point['eficiencias_individuais']))
+            table.setItem(row, 3, QTableWidgetItem(', '.join(point['rotores_envolvidos'])))
+        
+        # Adiciona botões de controle da tabela
+        table_buttons_layout = QHBoxLayout()
+        btn_add_row = QPushButton("Adicionar Ponto")
+        btn_add_row.clicked.connect(lambda _, table=table: self.add_combined_table_row(table))
+        btn_remove_row = QPushButton("Remover Ponto Selecionado")
+        btn_remove_row.clicked.connect(lambda _, table=table: self.remove_selected_table_row(table))
+        table_buttons_layout.addWidget(btn_add_row)
+        table_buttons_layout.addWidget(btn_remove_row)
+        table_buttons_layout.addStretch()
+        
+        layout.addWidget(table)
+        layout.addLayout(table_buttons_layout)
+        tab.setLayout(layout)
+        
+        self.tab_widget.addTab(tab, combined_name)
+        self.tab_widget.setCurrentWidget(tab)
+
+    def add_combined_table_row(self, table_widget):
+        """Adiciona linha na tabela de combinação"""
+        row_count = table_widget.rowCount()
+        table_widget.insertRow(row_count)
+        # Adicionar itens vazios
+        for col in range(4):
+            table_widget.setItem(row_count, col, QTableWidgetItem(""))
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
